@@ -5,24 +5,27 @@ import random
 import pymongo
 import requests
 import unidecode
-from tqdm import tqdm
-from rich.panel import Panel
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from rich.console import Console
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.panel import Panel
+from rich.console import Console
+from rich.text import Text
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn, MofNCompleteColumn
 
 load_dotenv('.env')
-console = Console()
 
-max_workers = 10 # Number of threads
-max_retries = 3 # Maximum retries
-retry_delay = 5 # Delay between retries (in seconds)
+clerkId = "user_2dbbs9Wcnrb2PXFWIgvCB4kgi9u"
+max_workers = 10  # Number of threads
+max_retries = 3  # Maximum retries
+retry_delay = 5  # Delay between retries (in seconds)
 
 # MongoDB connection setup
 MONGO_URI = os.getenv("MONGO_URI")
+if not MONGO_URI:
+    raise ValueError("MONGO_URI is not set in the environment variables.")
+
 client = pymongo.MongoClient(MONGO_URI)
 db = client['read_novel_v3']
 novels_collection = db['novels']
@@ -44,9 +47,9 @@ novel_genres = [
 ]
 
 # Function to generate slug from novel name
+# Remove special characters and replace spaces with hyphens
 def generate_slug(novel_name):
-
-    slug = unidecode.unidecode(novel_name) # Normalize Vietnamese characters
+    slug = unidecode.unidecode(novel_name)  # Normalize Vietnamese characters
     slug = re.sub(r'[^a-zA-Z0-9\s-]', '', slug)
     slug = re.sub(r'\s+', '-', slug)
     return slug.lower()
@@ -55,7 +58,7 @@ def extract_chapter_title(full_title):
     chapter_title = full_title.split(":")[-1].strip()
     return chapter_title.strip()
 
-def crawl_chapter(chapter_index, chapter_url, novel_slug, total_chapters, progress_bar):
+def crawl_chapter(chapter_index, chapter_url, novel_slug, progress, task_id):
     for attempt in range(max_retries):
         try:
             chapter_response = requests.get(chapter_url)
@@ -63,8 +66,11 @@ def crawl_chapter(chapter_index, chapter_url, novel_slug, total_chapters, progre
 
             chapter_soup = BeautifulSoup(chapter_response.content, 'html.parser')
 
-            full_title = chapter_soup.find('a', class_="chapter-title", title=True).get_text()
-            chapter_title = extract_chapter_title(full_title)
+            full_title = chapter_soup.find('a', class_="chapter-title", title=True)
+            if not full_title:
+                continue
+
+            chapter_title = extract_chapter_title(full_title.get_text())
             chapter_content = chapter_soup.find('div', class_='chapter-c')
 
             if chapter_content:
@@ -90,40 +96,32 @@ def crawl_chapter(chapter_index, chapter_url, novel_slug, total_chapters, progre
                 }
 
                 chapters_collection.insert_one(chapter_data)
-                # Cập nhật progress bar
-                progress_bar.update(1)
+                # Update progress
+                progress.update(task_id, advance=1)
                 break
 
             else:
-                print(f"Chapter {chapter_index} content is null, retrying... (Attempt {attempt + 1})")
+                time.sleep(retry_delay)
 
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching chapter {chapter_index}: {e}, retrying... (Attempt {attempt + 1})")
+        except requests.exceptions.RequestException:
             time.sleep(retry_delay)
 
-    else:
-        print(f"Failed to fetch chapter {chapter_index} after {max_retries} attempts.")
-
 def crawl_novel(url, total_chapters):
-    print("Starting crawl for URL:", url)
+    console = Console()
+    console.print(f"[bold cyan]Starting crawl for URL:[/bold cyan] {url}")
     response = requests.get(url)
     soup = BeautifulSoup(response.content, 'html.parser')
 
     novel_name = soup.find('h3', class_='title').text.strip()
-    print("Novel title:", novel_name)
     author = soup.find('a', itemprop='author').text.strip()
-    print("Author:", author)
     url_cover = soup.find('img', itemprop='image')['src'].strip()
     description = soup.find('div', itemprop='description')
-    # print("Description and cover URL fetched.")
-    
+
     # Create novel slug
     novel_slug = generate_slug(novel_name)
-    # print("Generated novel slug:", novel_slug)
 
     # Randomly select 2 to 4 genres
     selected_genres = random.sample(novel_genres, random.randint(2, 4))
-    # print("Selected genres:", selected_genres)
 
     # Insert the novel data into the novels collection
     current_time = datetime.now(timezone.utc)
@@ -134,7 +132,7 @@ def crawl_novel(url, total_chapters):
         "genres": selected_genres,
         "tags": [],
         "urlCover": url_cover,
-        "uploader": "user_2dbbs9Wcnrb2PXFWIgvCB4kgi9u",
+        "uploader": clerkId,
         "description": str(description),
         "shortDescription": "",
         "reviews": {
@@ -158,19 +156,36 @@ def crawl_novel(url, total_chapters):
         "createdAt": current_time,
         "updatedAt": current_time,
     }
-    novels_collection.insert_one(novel_data)
-    with tqdm(total=total_chapters, desc="Crawling Chapters", ncols=100, bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as progress_bar:
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        # TextColumn("[progress.completed] {task.completed}/{task.total} chương"),
+        TimeRemainingColumn(),
+    ) as progress:
+        console.print(Panel(f"[bold green]{novel_name}[/bold green] - [bold blue]{author}[/bold blue] - [bold yellow]{total_chapters}[/bold yellow] chương"))
+        task_id = progress.add_task("[cyan]Crawling novel chapters...", total=total_chapters)
+
+        novels_collection.insert_one(novel_data)
+
         # Concurrently crawl and insert chapters
-        with ThreadPoolExecutor(max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             for chapter_index in range(1, total_chapters + 1):
                 chapter_url = f"{url}chuong-{chapter_index}/"
-                executor.submit(crawl_chapter, chapter_index, chapter_url, novel_slug, total_chapters, progress_bar)
-    print("Finished inserting all chapters.")
+                executor.submit(crawl_chapter, chapter_index, chapter_url, novel_slug, progress, task_id)
 
-# Đọc url và total_chapters từ tệp văn bản
+copyright_text = Text("Bản quyền thuộc về Hoan Cu Te", style="bold blue")
+fb_link = Text("https://www.facebook.com/hoanit02/", style="link")
+console = Console()
+console.print(Panel(Text.assemble(copyright_text, " - ", fb_link), title="Thông tin liên hệ", expand=False))
+
 with open("novel_data.txt", "r") as file:
     for line in file:
-        url, total_chapters = line.strip().split(" ")
-        crawl_novel(url, int(total_chapters))
+        line = line.strip()
+        if line:
+            url, total_chapters = line.split(" ")
+            crawl_novel(url, int(total_chapters))
 
-print("Data has been inserted into MongoDB.")
+print("Finished processing all novels in the file.")

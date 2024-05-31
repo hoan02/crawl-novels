@@ -55,7 +55,7 @@ def crawl_novel(url, total_chapters):
     author = soup.find('a', itemprop='author').text.strip()
     print("Author:", author)
     url_cover = soup.find('img', itemprop='image')['src'].strip()
-    description = soup.find('div', itemprop='description').text.strip()
+    description = soup.find('div', itemprop='description')
     print("Description and cover URL fetched.")
     
     # Create novel slug
@@ -76,7 +76,8 @@ def crawl_novel(url, total_chapters):
         "tags": [],
         "urlCover": url_cover,
         "uploader": "user_2dbbs9Wcnrb2PXFWIgvCB4kgi9u",
-        "description": description,
+        "description": str(description),
+        "shortDescription": "",
         "reviews": {
             "count": 0,
             "avgScore": 0,
